@@ -2,12 +2,15 @@
 
 import streamlit as st
 
+from i18n import t, tb
 from prediction_core import RESULT_SOURCES, load_result_frame, score_column_name, source_summary
-from ui_helpers import metric_row, position_bar, score_bar, score_histogram, support_scatter
+from ui_helpers import metric_row, position_bar, render_chart, score_bar, score_histogram, support_scatter
 
-labels = {key: value["label"] for key, value in RESULT_SOURCES.items()}
+st.caption(tb("results_core_note"))
+
+labels = {key: t(value["label"]) for key, value in RESULT_SOURCES.items()}
 selected = st.segmented_control(
-    "结果来源",
+    t("结果来源"),
     list(RESULT_SOURCES),
     format_func=lambda key: labels[key],
     default="zeroshot",
@@ -22,17 +25,17 @@ except Exception as exc:
     st.error(str(exc))
     st.stop()
 
-st.caption(f"来源文件 `{summary['file']}` · {summary['note']}")
+st.caption(tb("results_source_caption", file=summary["file"], note=t(summary["note"])))
 
 metric_row(
     [
-        ("候选总数", str(summary["total"])),
-        ("最高分", f"{summary['top_score']:.3f}"),
-        ("中位分", f"{summary['median_score']:.3f}"),
-        ("平均分", f"{summary['mean_score']:.3f}"),
+        (t("候选总数"), str(summary["total"])),
+        (t("最高分"), f"{summary['top_score']:.3f}"),
+        (t("中位分"), f"{summary['median_score']:.3f}"),
+        (t("平均分"), f"{summary['mean_score']:.3f}"),
     ]
 )
-st.caption(f"排序依据 `{summary['score_col']}`（降序）；该文件不含真实标签，仅反映候选优先级。")
+st.caption(tb("results_rank_caption", score=summary["score_col"]))
 
 score_col = score_column_name(frame)
 support_col = next(
@@ -41,31 +44,28 @@ support_col = next(
 
 left, right = st.columns(2)
 with left:
-    st.markdown("**Top 16 候选**")
-    chart = score_bar(frame, "variant", score_col, limit=16)
-    if chart is not None:
-        st.altair_chart(chart, width="stretch")
+    st.markdown(f"**{t('Top 16 候选')}**")
+    render_chart(score_bar(frame, "variant", score_col, limit=16))
 with right:
-    st.markdown("**分数分布**")
-    chart = score_histogram(frame[score_col])
-    if chart is not None:
-        st.altair_chart(chart, width="stretch")
+    st.markdown(f"**{t('分数分布')}**")
+    render_chart(score_histogram(frame[score_col]))
 
 left, right = st.columns(2)
 with left:
-    st.markdown("**突变位点热区**")
-    chart = position_bar(frame["variant"].head(300))
-    if chart is not None:
-        st.altair_chart(chart, width="stretch")
+    st.markdown(f"**{t('突变位点热区')}**")
+    render_chart(position_bar(frame["variant"].head(300)))
 with right:
-    st.markdown("**分数与家族支持度**")
-    chart = support_scatter(frame, score_col, support_col) if support_col else None
-    if chart is None:
-        st.info("该结果文件不含 family_support 列。")
+    st.markdown(f"**{t('分数与家族支持度')}**")
+    if support_col:
+        chart = support_scatter(frame, score_col, support_col)
     else:
-        st.altair_chart(chart, width="stretch")
+        chart = None
+    if chart is None:
+        st.info(t("该结果文件不含 family_support 列。"))
+    else:
+        render_chart(chart)
 
-st.subheader(f"候选明细（共 {summary['total']} 条，显示前 200 条）")
+st.subheader(tb("results_detail_header", n=summary["total"]))
 preferred = [
     "rank",
     "variant",
@@ -88,24 +88,24 @@ st.dataframe(
     width="stretch",
     height=460,
     column_config={
-        "rank": st.column_config.NumberColumn("名次", width="small"),
-        "variant": st.column_config.TextColumn("突变体", width="medium"),
-        "mutations": st.column_config.TextColumn("突变列表", width="medium"),
-        "mutation_list": st.column_config.TextColumn("突变列表", width="medium"),
-        score_col: st.column_config.NumberColumn("排序分数", format="%.3f"),
-        "n_mut": st.column_config.NumberColumn("突变数", width="small"),
-        "positions": st.column_config.TextColumn("位点", width="small"),
-        "source": st.column_config.TextColumn("来源", width="small"),
-        "family_support": st.column_config.NumberColumn("家族支持度", format="%.2f"),
-        "homolog_pool_size": st.column_config.NumberColumn("同源池", width="small"),
-        "zs_sum": st.column_config.NumberColumn("零样本总分", format="%.3f"),
-        "zs_min": st.column_config.NumberColumn("零样本最低", format="%.3f"),
-        "zs_mean": st.column_config.NumberColumn("零样本均值", format="%.3f"),
+        "rank": st.column_config.NumberColumn(t("名次"), width="small"),
+        "variant": st.column_config.TextColumn(t("突变体"), width="medium"),
+        "mutations": st.column_config.TextColumn(t("突变列表"), width="medium"),
+        "mutation_list": st.column_config.TextColumn(t("突变列表"), width="medium"),
+        score_col: st.column_config.NumberColumn(t("排序分数"), format="%.3f"),
+        "n_mut": st.column_config.NumberColumn(t("突变数"), width="small"),
+        "positions": st.column_config.TextColumn(t("位点"), width="small"),
+        "source": st.column_config.TextColumn(t("来源"), width="small"),
+        "family_support": st.column_config.NumberColumn(t("家族支持度"), format="%.2f"),
+        "homolog_pool_size": st.column_config.NumberColumn(t("同源池"), width="small"),
+        "zs_sum": st.column_config.NumberColumn(t("零样本总分"), format="%.3f"),
+        "zs_min": st.column_config.NumberColumn(t("零样本最低"), format="%.3f"),
+        "zs_mean": st.column_config.NumberColumn(t("零样本均值"), format="%.3f"),
     },
 )
-st.caption("已隐藏 462 位的 sequence 列，避免表格被长文本撑开；完整字段请下载 CSV。")
+st.caption(t("已隐藏 462 位的 sequence 列，避免表格被长文本撑开；完整字段请下载 CSV。"))
 st.download_button(
-    "下载完整结果 CSV",
+    t("下载完整结果 CSV"),
     frame.to_csv(index=False).encode("utf-8-sig"),
     f"{source}_ranking.csv",
     "text/csv",

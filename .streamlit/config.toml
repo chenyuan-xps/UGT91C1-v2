@@ -10,6 +10,8 @@ borderColor = "#dbe4ef"
 [server]
 port = 8501
 headless = true
+# 共享部署时限制上传体积，避免有人误传大文件把服务卡住（本平台只上传 CSV，几十 KB 足够）
+maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false

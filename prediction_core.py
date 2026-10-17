@@ -33,6 +33,7 @@ SCRIPTS_DIR = BASE_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from i18n import t, tb  # noqa: E402
 from prior_features import PriorFeatureBuilder  # noqa: E402
 
 MODEL_PATH = BASE_DIR / "models" / "xgb_esm.pkl"
@@ -82,6 +83,56 @@ COVERAGE_LABELS = {
     "background_only": "仅背景位点",
 }
 
+
+
+# --------------------------------------------------------------------------- #
+# 重训互斥锁
+# --------------------------------------------------------------------------- #
+# 单用户本地使用时无所谓，但实验室多人共用一台机器时，两个人同时点
+# 「入库并重训」会交错写训练集、并互相覆盖 ESM 特征缓存与候选模型目录，
+# 因此用锁文件保证同一时间只有一个人重训。
+RETRAIN_LOCK = BASE_DIR / "models" / ".retrain.lock"
+RETRAIN_LOCK_STALE_SECONDS = 30 * 60
+
+
+def _retrain_lock_is_stale() -> bool:
+    """锁文件是否已过期（进程异常退出留下的残留）。"""
+    try:
+        age = datetime.now().timestamp() - RETRAIN_LOCK.stat().st_mtime
+    except OSError:
+        return False
+    return age >= RETRAIN_LOCK_STALE_SECONDS
+
+
+def acquire_retrain_lock() -> bool:
+    """抢占重训锁；返回 False 表示已有其他人在重训。
+
+    超过 ``RETRAIN_LOCK_STALE_SECONDS`` 未释放的锁视为残留并自动接管，
+    避免一次崩溃之后永远无法重训。注意：调用方在重训结束后必须调用
+    ``release_retrain_lock()``（包括每个失败分支）。
+    """
+    RETRAIN_LOCK.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(RETRAIN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        if not _retrain_lock_is_stale():
+            return False
+        RETRAIN_LOCK.unlink(missing_ok=True)
+        try:
+            fd = os.open(RETRAIN_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            return False
+    with os.fdopen(fd, "w") as handle:
+        handle.write(f"pid={os.getpid()} at={datetime.now():%Y-%m-%d %H:%M:%S}")
+    return True
+
+
+def release_retrain_lock() -> None:
+    """释放重训锁；未持有时调用也不报错。"""
+    try:
+        RETRAIN_LOCK.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -164,9 +215,11 @@ def model_params_text() -> str:
     params = get_resources()["meta"].get("model_params", {})
     if not params:
         return "XGBoost"
-    return (
-        f"XGBoost {params.get('n_estimators')} 棵 × 深度 {params.get('max_depth')}"
-        f" × lr {params.get('learning_rate')}"
+    return tb(
+        "core_model_params",
+        n=params.get("n_estimators"),
+        depth=params.get("max_depth"),
+        lr=params.get("learning_rate"),
     )
 
 
@@ -216,12 +269,11 @@ def prepare_candidates(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     if "variant" not in df.columns:
-        raise ValueError("CSV 至少需要包含 variant 列，例如 F208M 或 F208M;V129A。")
-
+        raise ValueError(t("CSV 至少需要包含 variant 列，例如 F208M 或 F208M;V129A。"))
     df["variant"] = df["variant"].astype(str).str.strip()
     df = df[df["variant"].ne("") & df["variant"].str.lower().ne("nan")].reset_index(drop=True)
     if df.empty:
-        raise ValueError("没有找到有效的突变体记录。")
+        raise ValueError(t("没有找到有效的突变体记录。"))
 
     if "mutation_list" not in df.columns:
         df["mutation_list"] = df["variant"].str.replace("-", ";", regex=False)
@@ -230,9 +282,7 @@ def prepare_candidates(df: pd.DataFrame) -> pd.DataFrame:
     missing = seq.eq("") | seq.str.lower().eq("nan")
     if missing.any():
         if not wt_sequence():
-            raise ValueError(
-                f"发现 {int(missing.sum())} 条记录缺少 sequence，且 data/wt.fasta 不可用，无法生成序列。"
-            )
+            raise ValueError(tb("core_missing_seq", n=int(missing.sum())))
         seq.loc[missing] = df.loc[missing].apply(
             lambda row: build_sequence(parse_mutations(row)), axis=1
         )
@@ -244,7 +294,7 @@ def read_upload_bytes(content: bytes) -> pd.DataFrame:
     import io
 
     if not content:
-        raise ValueError("上传文件为空。")
+        raise ValueError(t("上传文件为空。"))
     try:
         return pd.read_csv(io.BytesIO(content), encoding="utf-8-sig")
     except UnicodeDecodeError:
@@ -361,7 +411,7 @@ def run_upload_cv(x_matrix, df: pd.DataFrame):
     if target_col is None:
         return {
             "available": False,
-            "message": "本次上传数据未提供至少 5 条可用的 activity_rel / activity 标签，无法计算数值精度。",
+            "message": t("本次上传数据未提供至少 5 条可用的 activity_rel / activity 标签，无法计算数值精度。"),
         }, None
 
     y = pd.to_numeric(df[target_col], errors="coerce")
@@ -372,7 +422,7 @@ def run_upload_cv(x_matrix, df: pd.DataFrame):
     if len(y_valid) < 5:
         return {
             "available": False,
-            "message": "有效标签少于 5 条，无法执行五折交叉验证。",
+            "message": t("有效标签少于 5 条，无法执行五折交叉验证。"),
         }, None
 
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -403,7 +453,7 @@ def run_upload_cv(x_matrix, df: pd.DataFrame):
 
     return {
         "available": True,
-        "message": "已基于本次上传数据完成五折交叉验证（随机折，仅衡量数值拟合）。",
+        "message": t("已基于本次上传数据完成五折交叉验证（随机折，仅衡量数值拟合）。"),
         "target": target_col,
         "folds": folds,
         "rmse_mean": float(mean_squared_error(y_true, y_pred) ** 0.5),
@@ -421,23 +471,23 @@ def prediction_payload(raw_df: pd.DataFrame, progress=None) -> dict:
         if progress is not None:
             progress(step, message)
 
-    report(1, "读取并规范化上传 CSV")
+    report(1, t("读取并规范化上传 CSV"))
     df = prepare_candidates(raw_df)
 
-    report(2, "生成 ESM 序列表征")
+    report(2, t("生成 ESM 序列表征"))
     x_esm = esm_embeddings(tuple(df["sequence"].tolist()))
     esm_dim = res["meta"].get("esm_dim")
     if esm_dim is not None and int(x_esm.shape[1]) != int(esm_dim):
-        raise ValueError(f"ESM 表征维度不匹配：期望 {esm_dim}，实际 {x_esm.shape[1]}")
+        raise ValueError(tb("core_dim_mismatch", a=esm_dim, b=x_esm.shape[1]))
 
-    report(3, "构建融合特征")
+    report(3, t("构建融合特征"))
     x_prior, _ = res["prior_builder"].build_matrix(df)
     x_all = np.hstack([x_esm, x_prior])
 
-    report(4, "计算零样本分数（第一道排序器）")
+    report(4, t("计算零样本分数（第一道排序器）"))
     zs = zeroshot_scores(df)
 
-    report(5, "执行五折评估与模型预测")
+    report(5, t("执行五折评估与模型预测"))
     evaluation, cv_rows = run_upload_cv(x_all, df)
     pred = (
         cv_rows["cv_pred_activity"].to_numpy(dtype=float)
@@ -445,7 +495,7 @@ def prediction_payload(raw_df: pd.DataFrame, progress=None) -> dict:
         else res["xgb_model"].predict(x_all)
     )
 
-    report(6, "生成候选名次")
+    report(6, t("生成候选名次"))
     out = cv_rows.copy() if cv_rows is not None else df.copy()
     out["pred_activity"] = pred
     out = out.join(zs)
@@ -470,8 +520,10 @@ def score_column_name(df: pd.DataFrame) -> str:
         if col in df.columns:
             return col
     raise ValueError(
-        "结果文件里没有找到 pred_activity_rel / pred_activity_family / "
-        "pred_activity / zs_nonbg_sum / zs_sum 列。"
+        t(
+            "结果文件里没有找到 pred_activity_rel / pred_activity_family / "
+            "pred_activity / zs_nonbg_sum / zs_sum 列。"
+        )
     )
 
 
@@ -479,10 +531,10 @@ def score_column_name(df: pd.DataFrame) -> str:
 def load_result_frame(source_key: str) -> pd.DataFrame:
     info = RESULT_SOURCES.get(source_key)
     if info is None:
-        raise ValueError(f"未知结果来源：{source_key}")
+        raise ValueError(tb("core_unknown_source", key=source_key))
     path = info["path"]
     if not path.exists():
-        raise FileNotFoundError(f"结果文件不存在：{path.name}")
+        raise FileNotFoundError(tb("core_missing_file", name=path.name))
 
     df = pd.read_csv(path)
     col = score_column_name(df)
@@ -527,11 +579,10 @@ def load_recommendations() -> pd.DataFrame:
     """读取预计算的候选推荐表（融合了模型预测与零样本分数）。"""
     if not RECOMMEND_PATH.exists():
         raise FileNotFoundError(
-            "还没有候选推荐表，请先运行：python scripts/build_candidate_recommendations.py"
+            t("还没有候选推荐表，请先运行：python scripts/build_candidate_recommendations.py")
         )
-    df = pd.read_csv(RECOMMEND_PATH)
-    df["coverage_label"] = df["coverage"].map(COVERAGE_LABELS).fillna(df["coverage"])
-    return df
+    # coverage_label 由页面按当前语言生成，此处只返回原始覆盖类型。
+    return pd.read_csv(RECOMMEND_PATH)
 
 
 def recommendation_summary(df: pd.DataFrame) -> dict:
@@ -623,8 +674,12 @@ def run_stage_subprocess(args, *, tail_lines: int = 400):
     proc.wait()
     if proc.returncode != 0:
         raise RuntimeError(
-            f"子进程失败（退出码 {proc.returncode}）：{' '.join(Path(a).name for a in args[:1])}\n"
-            + "\n".join(buffer[-40:])
+            tb(
+                "core_subproc_fail",
+                code=proc.returncode,
+                name=" ".join(Path(a).name for a in args[:1]),
+                tail="\n".join(buffer[-40:]),
+            )
         )
 
 
@@ -713,7 +768,7 @@ def score_with_current_model(df: pd.DataFrame) -> pd.DataFrame:
     x_esm = esm_embeddings(tuple(frame["sequence"].tolist()))
     esm_dim = res["meta"].get("esm_dim")
     if esm_dim is not None and int(x_esm.shape[1]) != int(esm_dim):
-        raise ValueError(f"ESM 表征维度不匹配：期望 {esm_dim}，实际 {x_esm.shape[1]}")
+        raise ValueError(tb("core_dim_mismatch", a=esm_dim, b=x_esm.shape[1]))
     x_prior, _ = res["prior_builder"].build_matrix(frame)
     x_all = np.hstack([x_esm, x_prior])
 
@@ -762,7 +817,7 @@ def adopt_candidate(candidate_dir: Path, *, note: str = "") -> dict:
     candidate_dir = Path(candidate_dir)
     cand_model = candidate_dir / "model.pkl"
     if not cand_model.exists():
-        raise FileNotFoundError(f"候选目录里没有 model.pkl：{candidate_dir}")
+        raise FileNotFoundError(tb("core_missing_model", path=candidate_dir))
 
     cand_report, _ = load_candidate_report(candidate_dir)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
